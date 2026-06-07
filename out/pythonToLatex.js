@@ -146,16 +146,23 @@ const DOTTED_CONSTANTS = {
     'np.pi': '\\pi', 'np.e': 'e', 'np.inf': '\\infty', 'np.nan': '\\text{NaN}',
     'np.euler_gamma': '\\gamma', 'numpy.pi': '\\pi', 'numpy.e': 'e',
     'math.pi': '\\pi', 'math.e': 'e', 'math.inf': '\\infty', 'math.tau': '2\\pi',
-    'sp.pi': '\\pi', 'sympy.pi': '\\pi', 'sympy.E': 'e', 'sympy.I': 'i',
+    'sp.pi': '\\pi', 'sp.E': 'e', 'sp.I': 'i', 'sp.oo': '\\infty', 'sp.nan': '\\text{NaN}',
+    'sympy.pi': '\\pi', 'sympy.E': 'e', 'sympy.I': 'i', 'sympy.oo': '\\infty',
+    'oo': '\\infty', // bare oo from `from sympy import *`
 };
 function stripModulePrefix(name) {
     for (const p of [
-        'np.linalg.', 'np.fft.', 'np.random.', 'np.',
-        'numpy.linalg.', 'numpy.',
+        'np.linalg.', 'np.fft.', 'np.random.', 'np.polynomial.',
+        'np.',
+        'numpy.linalg.', 'numpy.fft.', 'numpy.random.', 'numpy.polynomial.',
+        'numpy.',
         'math.', 'cmath.',
-        'scipy.linalg.', 'scipy.special.', 'scipy.stats.', 'scipy.',
+        'scipy.integrate.', 'scipy.linalg.', 'scipy.special.', 'scipy.stats.',
+        'scipy.misc.', 'scipy.signal.', 'scipy.fft.', 'scipy.',
         'sympy.', 'sym.', 'sp.',
         'torch.linalg.', 'torch.', 'tf.math.', 'tf.',
+        'integrate.', // from scipy.integrate import ...
+        'special.', // from scipy.special import ...
     ]) {
         if (name.startsWith(p))
             return name.slice(p.length);
@@ -170,6 +177,24 @@ function identToLatex(name) {
     // Handle trailing j/J for complex literals that slipped through as identifiers
     if (name === 'j' || name === 'J')
         return 'i';
+    // Greek letter + digit suffix: theta1 → \theta_{1}, omega2 → \omega_{2}
+    // Try longest Greek name first to avoid e.g. "ph" matching inside "phi"
+    const greekNames = Object.keys(GREEK).sort((a, b) => b.length - a.length);
+    for (const greek of greekNames) {
+        if (name.startsWith(greek) && name.length > greek.length) {
+            const suffix = name.slice(greek.length);
+            if (/^\d+$/.test(suffix)) {
+                // purely numeric suffix → subscript digit(s)
+                return `${GREEK[greek]}_{${suffix}}`;
+            }
+            if (/^[a-zA-Z]\w*$/.test(suffix)) {
+                // alphabetic suffix → subscript identifier
+                const subLatex = identToLatex(suffix);
+                const subFinal = suffix.length > 1 ? `\\mathrm{${subLatex}}` : subLatex;
+                return `${GREEK[greek]}_{${subFinal}}`;
+            }
+        }
+    }
     // Subscripts: split on first underscore
     const u = name.indexOf('_');
     if (u > 0) {
@@ -186,6 +211,10 @@ function identToLatex(name) {
     // Single letter — natural italic in math mode
     if ([...name].length === 1)
         return name;
+    // Single ASCII letter + digit(s): x1 → x_{1}, P2 → P_{2}, v12 → v_{12}
+    const letterDigit = name.match(/^([a-zA-Z])(\d+)$/);
+    if (letterDigit)
+        return `${letterDigit[1]}_{${letterDigit[2]}}`;
     // Non-ASCII names must use \text{} because \mathrm{} only handles ASCII in KaTeX
     if (/[^\x00-\x7F]/.test(name))
         return `\\text{${name}}`;
@@ -199,6 +228,7 @@ function funcToLatex(rawName, args) {
         // Roots
         case 'sqrt': return `\\sqrt{${a}}`;
         case 'cbrt': return `\\sqrt[3]{${a}}`;
+        case 'root': return b ? `\\sqrt[${b}]{${a}}` : `\\sqrt{${a}}`;
         // Trig
         case 'sin': return `\\sin\\!\\left(${a}\\right)`;
         case 'cos': return `\\cos\\!\\left(${a}\\right)`;
@@ -212,11 +242,26 @@ function funcToLatex(rawName, args) {
         case 'arccos': return `\\arccos\\!\\left(${a}\\right)`;
         case 'atan':
         case 'arctan': return `\\arctan\\!\\left(${a}\\right)`;
+        case 'acot':
+        case 'arccot': return `\\operatorname{arccot}\\!\\left(${a}\\right)`;
+        case 'asec':
+        case 'arcsec': return `\\operatorname{arcsec}\\!\\left(${a}\\right)`;
+        case 'acsc':
+        case 'arccsc': return `\\operatorname{arccsc}\\!\\left(${a}\\right)`;
         case 'atan2': return `\\operatorname{atan2}\\!\\left(${a},\\,${b}\\right)`;
         // Hyperbolic
         case 'sinh': return `\\sinh\\!\\left(${a}\\right)`;
         case 'cosh': return `\\cosh\\!\\left(${a}\\right)`;
         case 'tanh': return `\\tanh\\!\\left(${a}\\right)`;
+        case 'coth': return `\\coth\\!\\left(${a}\\right)`;
+        case 'sech': return `\\operatorname{sech}\\!\\left(${a}\\right)`;
+        case 'csch': return `\\operatorname{csch}\\!\\left(${a}\\right)`;
+        case 'asinh':
+        case 'arcsinh': return `\\operatorname{arcsinh}\\!\\left(${a}\\right)`;
+        case 'acosh':
+        case 'arccosh': return `\\operatorname{arccosh}\\!\\left(${a}\\right)`;
+        case 'atanh':
+        case 'arctanh': return `\\operatorname{arctanh}\\!\\left(${a}\\right)`;
         // Exponential / log
         case 'exp': return `e^{${a}}`;
         case 'expm1': return `e^{${a}} - 1`;
@@ -251,7 +296,13 @@ function funcToLatex(rawName, args) {
         case 'pinv': return `{${a}}^{+}`;
         case 'transpose': return `{${a}}^{\\top}`;
         case 'T': return `{${a}}^{\\top}`;
-        case 'solve': return `${a}^{-1}\\,${b}`;
+        // linalg.solve(A,b) → A⁻¹b; sp.solve(f,x) → generic algebraic solver display
+        case 'solve':
+            if (rawName.includes('linalg'))
+                return `${a}^{-1}\\,${b}`;
+            return b
+                ? `\\left\\{${b} \\mid ${a} = 0\\right\\}`
+                : `\\operatorname{solve}\\!\\left(${a}\\right)`;
         case 'outer': return `${a} \\otimes ${b}`;
         case 'kron': return `${a} \\otimes ${b}`;
         // Complex
@@ -280,23 +331,96 @@ function funcToLatex(rawName, args) {
         case 'Pow': return `{${a}}^{${b}}`;
         case 'Add': return args.join(' + ');
         case 'Mul': return args.join(' \\cdot ');
-        // Calculus (SymPy)
+        // Equality / relational
+        case 'Eq': return `${a} = ${b}`;
+        case 'Ne': return `${a} \\neq ${b}`;
+        case 'Lt': return `${a} < ${b}`;
+        case 'Le': return `${a} \\leq ${b}`;
+        case 'Gt': return `${a} > ${b}`;
+        case 'Ge': return `${a} \\geq ${b}`;
+        // Lambda / anonymous function
+        case 'Lambda': return `${a} \\mapsto ${b}`;
+        // sp.latex(expr) — the user is calling latex() themselves; just render the inner expr
+        case 'latex': return a || '';
+        // Piecewise: args are pairs (expr, condition) passed as tuples → spread
+        case 'Piecewise': {
+            const cases = [];
+            for (const arg of args) {
+                const t = extractTuple(arg);
+                if (t && t.length >= 2) {
+                    cases.push(`${t[0]} & \\text{if } ${t[1]}`);
+                }
+                else if (arg) {
+                    cases.push(arg);
+                }
+            }
+            return `\\begin{cases} ${cases.join(' \\\\ ')} \\end{cases}`;
+        }
+        // Matrix / array constructors → \begin{bmatrix}...\end{bmatrix}
+        case 'Matrix':
+        case 'ImmutableMatrix':
+        case 'MutableMatrix':
+        case 'array':
+        case 'ndarray':
+        case 'mat':
+        case 'matrix':
+        case 'zeros':
+        case 'ones':
+        case 'eye':
+        case 'full':
+        case 'diag':
+        case 'block_diag': {
+            if (args.length === 1) {
+                const rows = parseLatexMatrix(args[0]);
+                if (rows) {
+                    const body = rows.map(r => r.join(' & ')).join(' \\\\ ');
+                    return `\\begin{bmatrix} ${body} \\end{bmatrix}`;
+                }
+            }
+            return `\\begin{bmatrix} ${args.join(',\\,')} \\end{bmatrix}`;
+        }
+        // Calculus (SymPy) — extract limits from tuple second argument
         case 'diff':
-        case 'Derivative':
-            if (c)
-                return `\\frac{d^{${c}} ${a}}{d\\,{${b}}^{${c}}}`;
-            return `\\frac{d}{d\\,${b || 'x'}}\\left(${a}\\right)`;
+        case 'Derivative': {
+            const wrt = b || 'x';
+            const order = c || '';
+            if (order)
+                return `\\frac{d^{${order}}}{d\\,${wrt}^{${order}}} ${groupForPostfix(a)}`;
+            return `\\frac{d}{d\\,${wrt}} ${groupForPostfix(a)}`;
+        }
         case 'integrate':
-        case 'Integral':
-            return `\\int ${a} \\, d${b || 'x'}`;
+        case 'Integral': {
+            if (b) {
+                const t = extractTuple(b);
+                if (t && t.length >= 3)
+                    return `\\int_{${t[1]}}^{${t[2]}} ${a} \\, d${t[0]}`;
+                return `\\int ${a} \\, d${b}`;
+            }
+            return `\\int ${a} \\, dx`;
+        }
         case 'limit':
         case 'Limit':
             return `\\lim_{${b || 'x'} \\to ${c || '\\infty'}} ${a}`;
         case 'Sum':
-        case 'summation':
+        case 'summation': {
+            if (b) {
+                const t = extractTuple(b);
+                if (t && t.length >= 3)
+                    return `\\sum_{${t[0]}=${t[1]}}^{${t[2]}} ${a}`;
+                if (t && t.length >= 1)
+                    return `\\sum_{${t[0]}} ${a}`;
+                return `\\sum_{${b}} ${a}`;
+            }
             return `\\sum ${a}`;
-        case 'Product':
+        }
+        case 'Product': {
+            if (b) {
+                const t = extractTuple(b);
+                if (t && t.length >= 3)
+                    return `\\prod_{${t[0]}=${t[1]}}^{${t[2]}} ${a}`;
+            }
             return `\\prod ${a}`;
+        }
         // Aggregation
         case 'sum': return `\\sum ${a}`;
         case 'prod':
@@ -316,6 +440,198 @@ function funcToLatex(rawName, args) {
         // Modular
         case 'mod': return `${a} \\bmod ${b}`;
         case 'divmod': return `\\left(\\left\\lfloor\\frac{${a}}{${b}}\\right\\rfloor,\\;${a} \\bmod ${b}\\right)`;
+        // ── Special functions (scipy.special / sympy / math) ──────────────────────
+        // Gamma & related
+        case 'gamma': return `\\Gamma\\!\\left(${a}\\right)`;
+        case 'loggamma':
+        case 'gammaln': return `\\ln\\Gamma\\!\\left(${a}\\right)`;
+        case 'rgamma': return `\\frac{1}{\\Gamma\\!\\left(${a}\\right)}`;
+        case 'digamma':
+        case 'psi': return `\\psi\\!\\left(${a}\\right)`;
+        case 'polygamma': return `\\psi^{\\left(${a}\\right)}\\!\\left(${b}\\right)`;
+        case 'trigamma': return `\\psi^{\\left(1\\right)}\\!\\left(${a}\\right)`;
+        case 'beta': return `\\mathrm{B}\\!\\left(${a},\\,${b}\\right)`;
+        case 'betaln': return `\\ln\\mathrm{B}\\!\\left(${a},\\,${b}\\right)`;
+        case 'betainc': return `I_{${c}}\\!\\left(${a},\\,${b}\\right)`;
+        case 'zeta': return b ? `\\zeta\\!\\left(${a},\\,${b}\\right)` : `\\zeta\\!\\left(${a}\\right)`;
+        case 'hurwitz_zeta': return `\\zeta\\!\\left(${a},\\,${b}\\right)`;
+        // Error functions
+        case 'erf': return `\\mathrm{erf}\\!\\left(${a}\\right)`;
+        case 'erfc': return `\\mathrm{erfc}\\!\\left(${a}\\right)`;
+        case 'erfinv': return `\\mathrm{erf}^{-1}\\!\\left(${a}\\right)`;
+        case 'erfcinv': return `\\mathrm{erfc}^{-1}\\!\\left(${a}\\right)`;
+        case 'erfi': return `\\mathrm{erfi}\\!\\left(${a}\\right)`;
+        case 'dawsn': return `F\\!\\left(${a}\\right)`; // Dawson function
+        // Bessel functions
+        case 'jv': return `J_{${a}}\\!\\left(${b}\\right)`;
+        case 'yv': return `Y_{${a}}\\!\\left(${b}\\right)`;
+        case 'iv': return `I_{${a}}\\!\\left(${b}\\right)`;
+        case 'kv': return `K_{${a}}\\!\\left(${b}\\right)`;
+        case 'j0': return `J_{0}\\!\\left(${a}\\right)`;
+        case 'j1': return `J_{1}\\!\\left(${a}\\right)`;
+        case 'y0': return `Y_{0}\\!\\left(${a}\\right)`;
+        case 'y1': return `Y_{1}\\!\\left(${a}\\right)`;
+        case 'hankel1': return `H^{(1)}_{${a}}\\!\\left(${b}\\right)`;
+        case 'hankel2': return `H^{(2)}_{${a}}\\!\\left(${b}\\right)`;
+        case 'jn_zeros':
+        case 'jnp_zeros': return `j_{${a},k}`;
+        // Airy functions
+        case 'airy': return `\\mathrm{Ai}\\!\\left(${a}\\right)`;
+        case 'airye': return `\\mathrm{Ai}\\!\\left(${a}\\right)`;
+        // Legendre / spherical harmonics
+        case 'lpmv': return `P_{${b}}^{${a}}\\!\\left(${c}\\right)`;
+        case 'sph_harm': return `Y_{${b}}^{${a}}\\!\\left(${c},\\,${args[3] ?? ''}\\right)`;
+        // Elliptic integrals
+        case 'ellipk':
+        case 'ellipkm1': return `K\\!\\left(${a}\\right)`;
+        case 'ellipe': return `E\\!\\left(${a}\\right)`;
+        case 'ellipj': return `\\mathrm{sn}\\!\\left(${a}\\mid${b}\\right)`;
+        // Hypergeometric
+        case 'hyp2f1': return `{}_{2}F_{1}\\!\\left(${a},\\,${b};\\,${c};\\,${args[3] ?? ''}\\right)`;
+        case 'hyp1f1': return `{}_{1}F_{1}\\!\\left(${a};\\,${b};\\,${c}\\right)`;
+        case 'hyp0f1': return `{}_{0}F_{1}\\!\\left(;\\,${a};\\,${b}\\right)`;
+        // ── Numerical integration — intent = ∫ regardless of library ─────────────
+        // scipy.integrate.quad(f, a, b) / fixed_quad / romberg / quadrature
+        case 'quad':
+        case 'fixed_quad':
+        case 'romberg':
+        case 'quadrature':
+        case 'quad_vec': {
+            // args: f, a, b  (+ optional kwargs)
+            const lo = b, hi = c;
+            if (lo && hi)
+                return `\\int_{${lo}}^{${hi}} ${a} \\, dx`;
+            if (lo)
+                return `\\int_{${lo}} ${a} \\, dx`;
+            return `\\int ${a} \\, dx`;
+        }
+        case 'dblquad': {
+            // args: f, a, b, gfun, hfun
+            const [, alo = '', ahi = ''] = args;
+            return `\\iint_{${alo}}^{${ahi}} ${a} \\, dy\\, dx`;
+        }
+        case 'tplquad': {
+            return `\\iiint ${a} \\, dz\\, dy\\, dx`;
+        }
+        case 'nquad': {
+            return `\\idotsint ${a} \\, d\\mathbf{x}`;
+        }
+        // numpy / scipy numerical quadrature on arrays
+        case 'trapz':
+        case 'trapezoid':
+        case 'cumtrapz':
+        case 'cumulative_trapezoid':
+        case 'simps':
+        case 'simpson':
+        case 'romb': {
+            // args: y [, x]  — render as definite integral if x given
+            if (b)
+                return `\\int ${a} \\, d${b}`;
+            return `\\int ${a} \\, dk`;
+        }
+        // ── Numerical differentiation — intent = d/dx regardless of library ───────
+        case 'gradient': {
+            // numpy.gradient(f) or numpy.gradient(f, x)
+            if (b)
+                return `\\frac{d}{d ${b}}\\left(${a}\\right)`;
+            return `\\nabla ${a}`;
+        }
+        case 'derivative': {
+            // scipy.misc.derivative(f, x0, dx)
+            if (b)
+                return `\\left.\\frac{d}{d x} ${a}\\right|_{x=${b}}`;
+            return `\\frac{d}{d x}\\left(${a}\\right)`;
+        }
+        case 'jacobian': {
+            return `J_{${a}}`;
+        }
+        case 'hessian': {
+            return `H_{${a}}`;
+        }
+        case 'laplacian': {
+            return `\\nabla^{2} ${a}`;
+        }
+        // ── ODE solvers — show as differential equation intent ────────────────────
+        case 'odeint':
+        case 'solve_ivp':
+        case 'ode': {
+            return `\\frac{d}{d t}\\left(${a}\\right)`;
+        }
+        // ── Fourier transforms ─────────────────────────────────────────────────────
+        case 'fft':
+        case 'rfft':
+        case 'fft2':
+        case 'fftn':
+            return `\\mathcal{F}\\!\\left\\{${a}\\right\\}`;
+        case 'ifft':
+        case 'irfft':
+        case 'ifft2':
+        case 'ifftn':
+            return `\\mathcal{F}^{-1}\\!\\left\\{${a}\\right\\}`;
+        case 'fftfreq':
+        case 'rfftfreq':
+            return `\\frac{k}{N}`;
+        // ── Laplace transform ─────────────────────────────────────────────────────
+        case 'laplace_transform':
+            return `\\mathcal{L}\\!\\left\\{${a}\\right\\}\\!\\left(${b}\\right)`;
+        case 'inverse_laplace_transform':
+            return `\\mathcal{L}^{-1}\\!\\left\\{${a}\\right\\}\\!\\left(${b}\\right)`;
+        // ── Convolution ───────────────────────────────────────────────────────────
+        case 'convolve':
+        case 'fftconvolve':
+        case 'oaconvolve':
+            return `\\left(${a} * ${b}\\right)`;
+        case 'correlate':
+        case 'fftcorrelate':
+            return `\\left(${a} \\star ${b}\\right)`;
+        // ── Statistics ────────────────────────────────────────────────────────────
+        case 'median': return `\\operatorname{median}\\!\\left(${a}\\right)`;
+        case 'cov':
+        case 'covariance': return `\\operatorname{Cov}\\!\\left(${a},\\,${b || a}\\right)`;
+        case 'corrcoef':
+        case 'correlation': return `\\operatorname{Corr}\\!\\left(${a},\\,${b || a}\\right)`;
+        case 'percentile':
+        case 'quantile':
+            return `Q_{${b}}\\!\\left(${a}\\right)`;
+        case 'histogram': return `\\#\\left\\{${a}\\right\\}`;
+        case 'pmf': return `P\\!\\left(X = ${a}\\right)`;
+        case 'pdf': return `f\\!\\left(${a}\\right)`;
+        case 'cdf': return `F\\!\\left(${a}\\right)`;
+        case 'ppf': return `F^{-1}\\!\\left(${a}\\right)`;
+        case 'sf': return `1 - F\\!\\left(${a}\\right)`;
+        case 'logpdf':
+        case 'logpmf': return `\\ln f\\!\\left(${a}\\right)`;
+        case 'logcdf': return `\\ln F\\!\\left(${a}\\right)`;
+        case 'entropy': return `H\\!\\left(${a}\\right)`;
+        case 'kl_div':
+        case 'rel_entr':
+            return `D_{\\mathrm{KL}}\\!\\left(${a}\\,\\|\\,${b}\\right)`;
+        // ── Number theory ─────────────────────────────────────────────────────────
+        case 'isprime': return `${a} \\in \\mathbb{P}`;
+        case 'nextprime': return `p_{\\text{next}}\\!\\left(${a}\\right)`;
+        case 'primepi': return `\\pi\\!\\left(${a}\\right)`;
+        case 'totient': return `\\varphi\\!\\left(${a}\\right)`;
+        case 'mobius': return `\\mu\\!\\left(${a}\\right)`;
+        case 'divisor_sigma': return b
+            ? `\\sigma_{${b}}\\!\\left(${a}\\right)`
+            : `\\sigma\\!\\left(${a}\\right)`;
+        // ── Norms / distances ─────────────────────────────────────────────────────
+        case 'vector_norm': return `\\left\\| ${a} \\right\\|`;
+        case 'matrix_norm': return `\\left\\| ${a} \\right\\|`;
+        case 'cond': return `\\kappa\\!\\left(${a}\\right)`;
+        case 'matrix_rank': return `\\operatorname{rank}\\!\\left(${a}\\right)`;
+        case 'rank': return `\\operatorname{rank}\\!\\left(${a}\\right)`;
+        case 'slogdet': return `\\ln\\left|\\det\\!\\left(${a}\\right)\\right|`;
+        case 'eig':
+        case 'eigh': return `\\lambda\\!\\left(${a}\\right)`;
+        case 'eigvals':
+        case 'eigvalsh': return `\\lambda\\!\\left(${a}\\right)`;
+        case 'svd': return `\\sigma\\!\\left(${a}\\right)`;
+        case 'svdvals': return `\\sigma\\!\\left(${a}\\right)`;
+        case 'qr': return `QR\\!\\left(${a}\\right)`;
+        case 'cholesky': return `L\\,L^{\\top} = ${a}`;
+        case 'lu': return `LU\\!\\left(${a}\\right)`;
+        case 'lstsq': return `\\arg\\min_{x}\\,\\left\\|${a}x - ${b}\\right\\|`;
         default: {
             // Fallback: render as operator name with parens
             const latexName = identToLatex(stripModulePrefix(rawName));
@@ -464,8 +780,7 @@ class Parser {
         if (this.peek().type === "**" /* TT.DoubleStar */) {
             this.advance();
             const exp = this.parseUnary(); // right-associative
-            // Wrap base in braces if it contains LaTeX commands (heuristic)
-            const baseWrapped = /[\\^_{}]/.test(base) ? `\\left(${base}\\right)` : base;
+            const baseWrapped = needsParenAsBase(base) ? `\\left(${base}\\right)` : base;
             return `{${baseWrapped}}^{${exp}}`;
         }
         return base;
@@ -489,7 +804,37 @@ class Parser {
             }
             const fullName = nameParts.join('.');
             if (this.peek().type === "(" /* TT.LParen */) {
-                // Function call
+                // Detect obj.method(args) where the last part is a known instance method,
+                // e.g. theta1.diff(t) — split so the object becomes the first argument.
+                const INSTANCE_METHODS = new Set([
+                    'diff', 'integrate', 'conjugate', 'conj',
+                    'simplify', 'expand', 'factor', 'subs', 'evalf', 'doit', 'series',
+                ]);
+                // Known module aliases — these are namespace qualifiers, not objects
+                const MODULE_ALIASES = new Set([
+                    'np', 'numpy', 'sp', 'sym', 'sympy', 'math', 'cmath',
+                    'scipy', 'torch', 'tf', 'integrate', 'special', 'linalg',
+                ]);
+                const lastPart = nameParts[nameParts.length - 1];
+                const baseIsModule = nameParts.length >= 2 && MODULE_ALIASES.has(nameParts[0]);
+                if (nameParts.length > 1 && INSTANCE_METHODS.has(lastPart) && !baseIsModule) {
+                    const objLatex = identToLatex(nameParts.slice(0, -1).join('.'));
+                    this.advance(); // LParen
+                    const args = this.parseArgList(")" /* TT.RParen */);
+                    this.advance(); // RParen
+                    let result;
+                    if (lastPart === 'diff') {
+                        result = applyDiff(objLatex, args);
+                    }
+                    else if (lastPart === 'conjugate' || lastPart === 'conj') {
+                        result = `\\overline{${objLatex}}`;
+                    }
+                    else {
+                        result = objLatex; // simplify/expand/etc are no-ops for display
+                    }
+                    return this.continuePostfix(result);
+                }
+                // Regular function / module call: np.sqrt(x), sin(x), etc.
                 this.advance();
                 const args = this.parseArgList(")" /* TT.RParen */);
                 this.advance(); // RParen
@@ -511,7 +856,7 @@ class Parser {
         }
         return this.continuePostfix(this.parsePrimary());
     }
-    // Handles trailing [] subscripts after an expression
+    // Handles trailing [], .attr, and .method() after an expression
     continuePostfix(base) {
         while (true) {
             if (this.peek().type === "[" /* TT.LBracket */) {
@@ -521,29 +866,57 @@ class Parser {
                 base = `{${base}}_{${idx.join(',\\,')}}`;
             }
             else if (this.peek().type === "." /* TT.Dot */) {
-                // Trailing .attr after a non-identifier base (e.g. expr.T)
                 const savedPos = this.pos;
                 this.advance();
-                if (this.peek().type === "IDENTIFIER" /* TT.Identifier */) {
-                    const attr = this.advance().value;
-                    if (attr === 'T') {
-                        base = `{${base}}^{\\top}`;
-                        continue;
-                    }
-                    if (attr === 'H') {
-                        base = `{${base}}^{\\dagger}`;
-                        continue;
-                    }
-                    if (attr === 'real') {
-                        base = `\\operatorname{Re}\\!\\left(${base}\\right)`;
-                        continue;
-                    }
-                    if (attr === 'imag') {
-                        base = `\\operatorname{Im}\\!\\left(${base}\\right)`;
-                        continue;
-                    }
-                    // Unknown attr — backtrack
+                if (this.peek().type !== "IDENTIFIER" /* TT.Identifier */) {
+                    this.pos = savedPos;
+                    break;
                 }
+                const attr = this.advance().value;
+                if (this.peek().type === "(" /* TT.LParen */) {
+                    // Method call: base.method(args)
+                    this.advance();
+                    const args = this.parseArgList(")" /* TT.RParen */);
+                    this.advance(); // RParen
+                    if (attr === 'diff') {
+                        base = applyDiff(base, args);
+                    }
+                    else if (attr === 'subs') {
+                        // expr.subs(old, new) — just show expr for display purposes
+                        // (substitution is a runtime operation we can't evaluate)
+                    }
+                    else if (attr === 'simplify' || attr === 'expand' || attr === 'factor') {
+                        // no-op for display
+                    }
+                    else if (attr === 'conjugate' || attr === 'conj') {
+                        base = `\\overline{${base}}`;
+                    }
+                    else if (attr === 'T') {
+                        base = `{${base}}^{\\top}`;
+                    }
+                    else {
+                        base = funcToLatex(attr, [base, ...args]);
+                    }
+                    continue;
+                }
+                // Plain attribute (no call)
+                if (attr === 'T') {
+                    base = `{${base}}^{\\top}`;
+                    continue;
+                }
+                if (attr === 'H') {
+                    base = `{${base}}^{\\dagger}`;
+                    continue;
+                }
+                if (attr === 'real') {
+                    base = `\\operatorname{Re}\\!\\left(${base}\\right)`;
+                    continue;
+                }
+                if (attr === 'imag') {
+                    base = `\\operatorname{Im}\\!\\left(${base}\\right)`;
+                    continue;
+                }
+                // Unknown attr — backtrack
                 this.pos = savedPos;
                 break;
             }
@@ -565,10 +938,27 @@ class Parser {
         }
         if (t.type === "(" /* TT.LParen */) {
             this.advance();
-            const inner = this.parseComparison();
+            if (this.peek().type === ")" /* TT.RParen */) {
+                this.advance();
+                return '\\left(\\right)';
+            }
+            const first = this.parseComparison();
+            // Detect Python tuple: (a, b, c)
+            if (this.peek().type === "," /* TT.Comma */) {
+                const elems = [first];
+                while (this.peek().type === "," /* TT.Comma */) {
+                    this.advance();
+                    if (this.peek().type === ")" /* TT.RParen */)
+                        break; // trailing comma
+                    elems.push(this.parseComparison());
+                }
+                if (this.peek().type === ")" /* TT.RParen */)
+                    this.advance();
+                return `\\left(${elems.join(',\\,')}\\right)`;
+            }
             if (this.peek().type === ")" /* TT.RParen */)
                 this.advance();
-            return `\\left(${inner}\\right)`;
+            return `\\left(${first}\\right)`;
         }
         if (t.type === "[" /* TT.LBracket */) {
             this.advance();
@@ -605,6 +995,89 @@ class Parser {
     }
 }
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Tuple / matrix helpers ───────────────────────────────────────────────────
+// Split s at delim, respecting depth of (), [], {}
+function splitAtDelim(s, delim) {
+    const parts = [];
+    let depth = 0, start = 0;
+    for (let i = 0; i < s.length; i++) {
+        if ('({['.includes(s[i]))
+            depth++;
+        else if (')}]'.includes(s[i])) {
+            if (depth > 0)
+                depth--;
+        }
+        else if (depth === 0 && s.startsWith(delim, i)) {
+            parts.push(s.slice(start, i).trim());
+            start = i + delim.length;
+            i += delim.length - 1;
+        }
+    }
+    parts.push(s.slice(start).trim());
+    return parts;
+}
+// If s is a LaTeX tuple \left(a,\,b,\,c\right), return ['a','b','c'], else null
+function extractTuple(s) {
+    const P = '\\left(', S = '\\right)';
+    if (!s.startsWith(P) || !s.endsWith(S))
+        return null;
+    const inner = s.slice(P.length, s.length - S.length);
+    const parts = splitAtDelim(inner, ',\\,');
+    return parts.length >= 2 ? parts : null;
+}
+// If s is \left[[r1],[r2],...\right], return rows as string[][]
+function parseLatexMatrix(s) {
+    const P = '\\left[', S = '\\right]';
+    if (!s.startsWith(P) || !s.endsWith(S))
+        return null;
+    const inner = s.slice(P.length, s.length - S.length);
+    const rowStrs = splitAtDelim(inner, ',\\,');
+    const rows = [];
+    for (const rs of rowStrs) {
+        const t = rs.trim();
+        if (!t.startsWith(P) || !t.endsWith(S))
+            return null;
+        const rowInner = t.slice(P.length, t.length - S.length);
+        rows.push(splitAtDelim(rowInner, ',\\,').map(c => c.trim()));
+    }
+    return rows.length > 0 ? rows : null;
+}
+// expr.diff(t) → \dot{expr}   expr.diff(t, 2) → \ddot{expr}   higher → \frac{d^n}{dt^n} expr
+function applyDiff(expr, args) {
+    const wrt = args[0] ?? 't';
+    const order = args[1] ?? '1';
+    if (order === '1')
+        return `\\dot{${expr}}`;
+    if (order === '2')
+        return `\\ddot{${expr}}`;
+    return `\\frac{d^{${order}}}{d {${wrt}}^{${order}}} ${groupForPostfix(expr)}`;
+}
+// Wrap in \left(\right) only when the expression genuinely needs grouping
+// as a "postfix" operand (after \frac{d}{dx}, exponent base, etc.).
+// Rules: fractions need it; additive expressions need it; simple atoms don't.
+function needsParenAsBase(s) {
+    if (s.startsWith('\\frac'))
+        return true;
+    // top-level + or - (outside braces/parens)
+    let depth = 0;
+    for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (ch === '{' || ch === '(') {
+            depth++;
+            continue;
+        }
+        if (ch === '}' || ch === ')') {
+            depth--;
+            continue;
+        }
+        if (depth === 0 && (ch === '+' || ch === '-') && i > 0)
+            return true;
+    }
+    return false;
+}
+function groupForPostfix(s) {
+    return needsParenAsBase(s) ? `\\left(${s}\\right)` : s;
+}
 function joinFactors(factors) {
     if (factors.length === 0)
         return '1';
@@ -614,20 +1087,20 @@ function joinFactors(factors) {
     for (let k = 1; k < factors.length; k++) {
         const left = factors[k - 1];
         const right = factors[k];
-        // Omit \cdot when: (number)(letter), (letter)(paren), (paren)(letter)
-        const isSimpleLeft = /^[\d.]/.test(left) || /^[a-zA-Z]$/.test(left);
-        const isSimpleRight = /^[a-zA-Z(\\]/.test(right);
-        if (isSimpleLeft && isSimpleRight) {
-            parts.push(right);
-        }
-        else {
-            parts.push(` \\cdot ${right}`);
-        }
+        // Omit \cdot only when both sides are plain single letters or a digit followed
+        // by a single letter — never when either side is a LaTeX command (\...).
+        const leftIsSingle = /^[a-zA-Z]$/.test(left);
+        const rightIsSingle = /^[a-zA-Z]$/.test(right);
+        const leftIsDigit = /^[\d.]/.test(left);
+        const rightIsLatexCmd = right.startsWith('\\');
+        const omitCdot = !rightIsLatexCmd && ((leftIsSingle && rightIsSingle) ||
+            (leftIsDigit && rightIsSingle));
+        parts.push(omitCdot ? right : ` \\cdot ${right}`);
     }
     return parts.join('');
 }
 function needsParenInUnary(s) {
-    return s.includes(' + ') || s.includes(' - ');
+    return needsParenAsBase(s);
 }
 function formatNumber(s) {
     // Complex: 3j → 3i
