@@ -297,7 +297,10 @@ function showQuickPanel(context, code, result) {
         quickPanel.onDidDispose(() => { quickPanel = undefined; quickPanelCode = ''; });
         quickPanel.webview.onDidReceiveMessage(() => {
             if (quickPanelCode) {
-                showExtendedPanel(context, quickPanelCode, quickPanelResult);
+                const code = quickPanelCode;
+                const result = quickPanelResult;
+                closeQuickPanel(); // close quick panel first
+                showExtendedPanel(context, code, result);
             }
         });
     }

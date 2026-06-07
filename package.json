@@ -1,34 +1,65 @@
 {
   "name": "python-expression-visualizer",
   "displayName": "Python Expression Visualizer",
-  "description": "Render highlighted Python math expressions as formatted LaTeX equations",
-  "version": "0.1.0",
-  "engines": { "vscode": "^1.85.0" },
-  "categories": ["Other"],
-  "activationEvents": [],
+  "description": "Instantly render Python math expressions — NumPy, SymPy, SciPy and more — as beautifully formatted LaTeX equations. Works in .py files and Jupyter notebooks.",
+  "version": "0.1.2",
+  "publisher": "NickGholami",
+  "icon": "images/icon.png",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Visualization",
+    "Education"
+  ],
+  "keywords": [
+    "python",
+    "math",
+    "latex",
+    "equations",
+    "visualizer",
+    "numpy",
+    "sympy",
+    "scipy",
+    "jupyter",
+    "mathematics"
+  ],
+  "galleryBanner": {
+    "color": "#1e1e2e",
+    "theme": "dark"
+  },
+  "activationEvents": [
+    "onLanguage:python",
+    "onNotebook:jupyter-notebook"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
       {
         "command": "pythonVisualizer.visualize",
-        "title": "Visualize Expression"
+        "title": "Visualize Expression",
+        "category": "Python Visualizer"
       },
       {
         "command": "pythonVisualizer.quickPreview",
-        "title": "Quick Equation Preview"
+        "title": "Quick Equation Preview",
+        "category": "Python Visualizer"
       }
     ],
     "keybindings": [
       {
         "command": "pythonVisualizer.quickPreview",
         "key": "shift+alt+v",
+        "mac": "shift+alt+v",
         "when": "editorHasSelection && editorTextFocus"
       }
     ],
     "menus": {
       "editor/context": [
         {
-          "when": "editorHasSelection",
+          "when": "editorHasSelection && resourceLangId == python",
           "command": "pythonVisualizer.visualize",
           "group": "navigation"
         }

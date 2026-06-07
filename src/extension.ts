@@ -5,6 +5,7 @@ import * as fs from 'fs';
 import { spawnSync } from 'child_process';
 import { pythonToLatex, ConversionResult } from './pythonToLatex';
 
+
 // ─── Python runner script (written to disk once per session) ─────────────────
 // Receives a JSON data file as argv[1] containing { code, preamble }.
 // Executes the preamble + code in a SymPy namespace, then prints latex(result).
@@ -266,7 +267,12 @@ function showQuickPanel(context: vscode.ExtensionContext, code: string, result: 
     quickPanel.onDidDispose(() => { quickPanel = undefined; quickPanelCode = ''; });
 
     quickPanel.webview.onDidReceiveMessage(() => {
-      if (quickPanelCode) { showExtendedPanel(context, quickPanelCode, quickPanelResult); }
+      if (quickPanelCode) {
+        const code   = quickPanelCode;
+        const result = quickPanelResult;
+        closeQuickPanel();               // close quick panel first
+        showExtendedPanel(context, code, result);
+      }
     });
   }
 
