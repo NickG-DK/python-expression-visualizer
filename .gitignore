@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Compiled output
+out/
+
+# Packaged extensions
+*.vsix
+
+# Build artifacts
+tsc
+
+# Jupyter notebooks (remove if you want to share test notebooks)
+*.ipynb
+
+# Claude Code local settings
+.claude/
+
+# macOS
+.DS_Store
+
+# VS Code local settings (launch/tasks are okay to keep)
+# .vscode/
