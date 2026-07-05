@@ -12,11 +12,11 @@ Instantly render Python math expressions as beautifully formatted equations. Sup
 
 | Python                        | Rendered                                       |
 | ----------------------------- | ---------------------------------------------- |
-| `sp.integrate(f, (x, 0, 1))`  | <img src="images/integral.png" width="200">    |
-| `np.linalg.det(A)`            | <img src="images/determinant.png" width="200"> |
-| `sp.diff(f, x, 2)`            | <img src="images/diff.png" width="200">        |
-| `sp.Matrix([[a, b], [c, d]])` | <img src="images/matrix.png" width="200">      |
-| `np.sqrt(x**2 + y**2)`        | <img src="images/sqareroot.png" width="200">   |
+| `sp.integrate(f, (x, 0, 1))`  | <img src="https://raw.githubusercontent.com/NickG-DK/python-expression-visualizer/main/images/integral.png" width="200">    |
+| `np.linalg.det(A)`            | <img src="https://raw.githubusercontent.com/NickG-DK/python-expression-visualizer/main/images/determinant.png" width="200"> |
+| `sp.diff(f, x, 2)`            | <img src="https://raw.githubusercontent.com/NickG-DK/python-expression-visualizer/main/images/diff.png" width="200">        |
+| `sp.Matrix([[a, b], [c, d]])` | <img src="https://raw.githubusercontent.com/NickG-DK/python-expression-visualizer/main/images/matrix.png" width="200">      |
+| `np.sqrt(x**2 + y**2)`        | <img src="https://raw.githubusercontent.com/NickG-DK/python-expression-visualizer/main/images/sqareroot.png" width="200">   |
 
 ## Features
 

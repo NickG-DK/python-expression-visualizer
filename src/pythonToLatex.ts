@@ -19,6 +19,8 @@ const enum TT {
   Comma      = ',',
   Dot        = '.',
   Equals     = '=',
+  Colon      = ':',           // Fix #8: needed to delimit lambda parameter lists
+  Lambda     = 'lambda',      // Fix #8: lambda keyword token
   EqEq       = '==',
   NotEq      = '!=',
   Lt         = '<',
@@ -80,7 +82,10 @@ function tokenize(src: string): Token[] {
     if (/[_\p{L}]/u.test(ch)) {
       let j = i;
       while (j < src.length && /[\d_\p{L}]/u.test(src[j])) j++;
-      out.push({ type: TT.Identifier, value: src.slice(i, j) });
+      const word = src.slice(i, j);
+      // Fix #8: 'lambda' is a Python keyword, not an identifier — emit a dedicated
+      // token so `lambda x: x**2` can render as x ↦ x² instead of \lambda x x^2
+      out.push({ type: word === 'lambda' ? TT.Lambda : TT.Identifier, value: word });
       i = j; continue;
     }
 
@@ -102,6 +107,7 @@ function tokenize(src: string): Token[] {
       '[': TT.LBracket, ']': TT.RBracket,
       ',': TT.Comma, '.': TT.Dot, '=': TT.Equals,
       '<': TT.Lt, '>': TT.Gt,
+      ':': TT.Colon, // Fix #8: ':' is now a real token (lambda); ':=' is still skipped above
     };
     if (SINGLE[ch]) { out.push({ type: SINGLE[ch]!, value: ch }); i++; continue; }
 
@@ -161,6 +167,16 @@ function stripModulePrefix(name: string): string {
   return name;
 }
 
+// Fix #16: subscript renderer — 1–2 letter subscripts stay italic (sigma_ij → \sigma_{ij});
+// only word-like subscripts of 3+ letters (x_max, T_out) are wrapped in \mathrm.
+function subscriptToLatex(sub: string): string {
+  if (GREEK[sub]) return GREEK[sub];
+  if (/^\d+$/.test(sub)) return sub;
+  if (/^[a-zA-Z]{1,2}$/.test(sub)) return sub;
+  if (/^[a-zA-Z]+$/.test(sub)) return `\\mathrm{${sub}}`;
+  return identToLatex(sub);
+}
+
 function identToLatex(name: string): string {
   if (CONSTANTS[name]) return CONSTANTS[name];
   if (GREEK[name])    return GREEK[name];
@@ -179,10 +195,8 @@ function identToLatex(name: string): string {
         return `${GREEK[greek]}_{${suffix}}`;
       }
       if (/^[a-zA-Z]\w*$/.test(suffix)) {
-        // alphabetic suffix → subscript identifier
-        const subLatex = identToLatex(suffix);
-        const subFinal = suffix.length > 1 ? `\\mathrm{${subLatex}}` : subLatex;
-        return `${GREEK[greek]}_{${subFinal}}`;
+        // alphabetic suffix → subscript identifier (Fix #16: no \mathrm for short subs)
+        return `${GREEK[greek]}_{${subscriptToLatex(suffix)}}`;
       }
     }
   }
@@ -192,13 +206,8 @@ function identToLatex(name: string): string {
   if (u > 0) {
     const base = name.slice(0, u);
     const sub  = name.slice(u + 1);
-    const baseLatex = identToLatex(base);
-    const subLatex  = identToLatex(sub);
-    // Wrap multi-char alphabetic subscripts in \mathrm
-    const subFinal = ([...sub].length > 1 && /^[a-zA-Z]+$/.test(sub))
-      ? `\\mathrm{${subLatex}}`
-      : subLatex;
-    return `${baseLatex}_{${subFinal}}`;
+    // Fix #16: short alphabetic subscripts (ij, xy) stay italic; \mathrm only for words
+    return `${identToLatex(base)}_{${subscriptToLatex(sub)}}`;
   }
 
   // Single letter — natural italic in math mode
@@ -338,12 +347,16 @@ function funcToLatex(rawName: string, args: string[]): string {
     case 'latex': return a || '';
 
     // Piecewise: args are pairs (expr, condition) passed as tuples → spread
+    // Fix #9: extractTuple now robustly unwraps rendered LaTeX tuples (any paren style
+    // or comma separator), so (expr, cond) pairs no longer silently fail; a literal
+    // True condition renders as "otherwise".
     case 'Piecewise': {
       const cases: string[] = [];
       for (const arg of args) {
         const t = extractTuple(arg);
         if (t && t.length >= 2) {
-          cases.push(`${t[0]} & \\text{if } ${t[1]}`);
+          const cond = t[1] === '\\text{True}' ? '\\text{otherwise}' : `\\text{if } ${t[1]}`;
+          cases.push(`${t[0]} & ${cond}`);
         } else if (arg) {
           cases.push(arg);
         }
@@ -351,10 +364,34 @@ function funcToLatex(rawName: string, args: string[]): string {
       return `\\begin{cases} ${cases.join(' \\\\ ')} \\end{cases}`;
     }
 
+    // Fix #6: zeros/ones/eye/full render as actual constant matrices (or a symbolic
+    // 0/1/I with dimensions) instead of a bmatrix containing the shape tuple.
+    case 'eye': case 'identity': {
+      const n = Number(a);
+      if (Number.isInteger(n) && n > 0 && n <= 8) {
+        const rows = Array.from({ length: n }, (_, r) =>
+          Array.from({ length: n }, (_, cIdx) => (r === cIdx ? '1' : '0')).join(' & '));
+        return `\\begin{bmatrix} ${rows.join(' \\\\ ')} \\end{bmatrix}`;
+      }
+      return `I_{${a}}`;
+    }
+    case 'zeros': case 'ones': case 'full': {
+      const fill  = name === 'ones' ? '1' : name === 'full' ? (b || '0') : '0';
+      // Shape comes either as a tuple first argument — zeros((3,3)) — or as
+      // separate positional args — zeros(3, 3) (SymPy style)
+      const shape = (name === 'full' || args.length === 1)
+        ? (extractTuple(a) ?? [a])
+        : args;
+      const explicit = buildConstMatrix(shape, fill);
+      if (explicit) return explicit;
+      const dims = shape.join(' \\times ');
+      if (name === 'full') return `${fill} \\cdot \\mathbf{1}_{${dims}}`;
+      return `${name === 'ones' ? '\\mathbf{1}' : '\\mathbf{0}'}_{${dims}}`;
+    }
+
     // Matrix / array constructors → \begin{bmatrix}...\end{bmatrix}
     case 'Matrix': case 'ImmutableMatrix': case 'MutableMatrix':
     case 'array': case 'ndarray': case 'mat': case 'matrix':
-    case 'zeros': case 'ones': case 'eye': case 'full':
     case 'diag': case 'block_diag': {
       if (args.length === 1) {
         const rows = parseLatexMatrix(args[0]);
@@ -477,10 +514,15 @@ function funcToLatex(rawName: string, args: string[]): string {
     case 'quad': case 'fixed_quad': case 'romberg': case 'quadrature':
     case 'quad_vec': {
       // args: f, a, b  (+ optional kwargs)
+      // Fix #8: a lambda integrand (x ↦ x²) unwraps into the integrand, with the
+      // lambda parameter becoming the integration variable
+      const lam = a.match(/^(.+?) \\mapsto (.+)$/);
+      const integrand = lam ? lam[2] : a;
+      const dvar      = lam && /^[^\\{}]*$|^\\[a-zA-Z]+$/.test(lam[1]) ? lam[1] : 'x';
       const lo = b, hi = c;
-      if (lo && hi) return `\\int_{${lo}}^{${hi}} ${a} \\, dx`;
-      if (lo)       return `\\int_{${lo}} ${a} \\, dx`;
-      return `\\int ${a} \\, dx`;
+      if (lo && hi) return `\\int_{${lo}}^{${hi}} ${integrand} \\, d${dvar}`;
+      if (lo)       return `\\int_{${lo}} ${integrand} \\, d${dvar}`;
+      return `\\int ${integrand} \\, d${dvar}`;
     }
     case 'dblquad': {
       // args: f, a, b, gfun, hfun
@@ -603,6 +645,21 @@ function funcToLatex(rawName: string, args: string[]): string {
 
 // ─── Parser ───────────────────────────────────────────────────────────────────
 
+// Methods that, on a non-module object, are instance methods (theta1.diff(t))
+const INSTANCE_METHODS = new Set([
+  'diff', 'integrate', 'conjugate', 'conj',
+  'simplify', 'expand', 'factor', 'subs', 'evalf', 'doit', 'series',
+]);
+
+// Fix #4: cover all common module aliases AND submodule names, and check every
+// prefix segment — so scipy.integrate.quad, np.linalg.solve, sp.integrate(...)
+// are never mistaken for instance-method calls.
+const MODULE_ALIASES = new Set([
+  'np', 'numpy', 'sp', 'sym', 'sympy', 'math', 'cmath', 'scipy', 'torch', 'tf',
+  'integrate', 'special', 'linalg', 'fft', 'random', 'stats', 'signal',
+  'optimize', 'sparse', 'misc', 'polynomial',
+]);
+
 class Parser {
   private pos = 0;
   constructor(private readonly tokens: Token[]) {}
@@ -621,31 +678,52 @@ class Parser {
 
   // ── Top-level: one statement (assignment or expression) ────────────────────
 
-  parseStatement(): string {
+  // Fix #2 + #10: returns a structured { lhs, rhs } so callers can align only on true
+  // assignments; augmented (+=), tuple-unpacking, chained, and subscripted assignments
+  // degrade gracefully to rendering just the final RHS.
+  parseStatement(): { lhs: string | null; rhs: string } {
     this.skipNewlines();
-    if (this.peek().type === TT.EOF) return '';
+    if (this.peek().type === TT.EOF) return { lhs: null, rhs: '' };
 
-    // Detect assignment: IDENTIFIER [op]= expr
-    // We do a lightweight lookahead: first token IDENTIFIER, second =
-    if (this.peek().type === TT.Identifier) {
-      const saved = this.pos;
-      const lhsName = this.advance().value;
-
-      if (this.peek().type === TT.Equals) {
-        this.advance(); // consume =
-        const rhs = this.parseComparison();
-        return `${identToLatex(lhsName)} = ${rhs}`;
-      }
-      // Not an assignment — backtrack
-      this.pos = saved;
+    // Pre-scan for top-level '=' tokens. kwargs inside call parens sit at depth > 0,
+    // and anything after a lambda keyword belongs to the lambda (default values).
+    const eqPositions: number[] = [];
+    let depth = 0;
+    for (let k = this.pos; k < this.tokens.length; k++) {
+      const t = this.tokens[k].type;
+      if (t === TT.Newline || t === TT.EOF || t === TT.Lambda) break;
+      if (t === TT.LParen || t === TT.LBracket) depth++;
+      else if (t === TT.RParen || t === TT.RBracket) depth--;
+      else if (t === TT.Equals && depth === 0) eqPositions.push(k);
     }
 
-    return this.parseComparison();
+    if (eqPositions.length > 0) {
+      const simpleAssignment =
+        eqPositions.length === 1 &&
+        eqPositions[0] === this.pos + 1 &&
+        this.tokens[this.pos].type === TT.Identifier;
+
+      if (simpleAssignment) {
+        const lhsName = this.advance().value;
+        this.advance(); // consume =
+        return { lhs: identToLatex(lhsName), rhs: this.parseComparison() };
+      }
+
+      // Anything fancier (a += b, a, b = f(x), a = b = expr, x[0] = expr):
+      // skip to after the last '=' and show only the RHS
+      this.pos = eqPositions[eqPositions.length - 1] + 1;
+      return { lhs: null, rhs: this.parseComparison() };
+    }
+
+    return { lhs: null, rhs: this.parseComparison() };
   }
 
   // ── Comparison ────────────────────────────────────────────────────────────
 
   private parseComparison(): string {
+    // Fix #8: lambda has the lowest precedence — intercept it before comparisons
+    if (this.peek().type === TT.Lambda) return this.parseLambda();
+
     let left = this.parseAdditive();
 
     const REL: Partial<Record<TT, string>> = {
@@ -660,6 +738,24 @@ class Parser {
       left = `${left} ${REL[op]!} ${right}`;
     }
     return left;
+  }
+
+  // Fix #8: lambda x, y: body → (x, y) ↦ body
+  private parseLambda(): string {
+    this.advance(); // consume 'lambda'
+    const params: string[] = [];
+    while (this.peek().type === TT.Identifier) {
+      params.push(identToLatex(this.advance().value));
+      if (this.peek().type === TT.Equals) {
+        this.advance();
+        this.parseComparison(); // discard default value — not part of the math
+      }
+      if (this.peek().type === TT.Comma) this.advance(); else break;
+    }
+    if (this.peek().type === TT.Colon) this.advance();
+    const body = this.parseComparison();
+    const head = params.length === 1 ? params[0] : `\\left(${params.join(',\\,')}\\right)`;
+    return `${head} \\mapsto ${body}`;
   }
 
   // ── Additive ──────────────────────────────────────────────────────────────
@@ -723,7 +819,8 @@ class Parser {
     }
 
     if (den.length === 0) return joinFactors(num);
-    return `\\frac{${joinFactors(num)}}{${joinFactors(den)}}`;
+    // Fix #1: \frac already groups its parts — outer parens inside it are redundant
+    return `\\frac{${unwrapGroup(joinFactors(num))}}{${unwrapGroup(joinFactors(den))}}`;
   }
 
   // ── Unary ─────────────────────────────────────────────────────────────────
@@ -747,7 +844,8 @@ class Parser {
       this.advance();
       const exp = this.parseUnary(); // right-associative
       const baseWrapped = needsParenAsBase(base) ? `\\left(${base}\\right)` : base;
-      return `{${baseWrapped}}^{${exp}}`;
+      // Fix #1: the ^{…} braces already group the exponent — x**(n-1) → x^{n - 1}
+      return `{${baseWrapped}}^{${unwrapGroup(exp)}}`;
     }
     return base;
   }
@@ -775,25 +873,21 @@ class Parser {
       if (this.peek().type === TT.LParen) {
         // Detect obj.method(args) where the last part is a known instance method,
         // e.g. theta1.diff(t) — split so the object becomes the first argument.
-        const INSTANCE_METHODS = new Set([
-          'diff', 'integrate', 'conjugate', 'conj',
-          'simplify', 'expand', 'factor', 'subs', 'evalf', 'doit', 'series',
-        ]);
-        // Known module aliases — these are namespace qualifiers, not objects
-        const MODULE_ALIASES = new Set([
-          'np', 'numpy', 'sp', 'sym', 'sympy', 'math', 'cmath',
-          'scipy', 'torch', 'tf', 'integrate', 'special', 'linalg',
-        ]);
         const lastPart = nameParts[nameParts.length - 1];
-        const baseIsModule = nameParts.length >= 2 && MODULE_ALIASES.has(nameParts[0]);
+        // Fix #4: check EVERY prefix segment against MODULE_ALIASES, so
+        // scipy.integrate.quad / np.linalg.solve / sp.integrate are module calls
+        const baseIsModule = nameParts.slice(0, -1).some(p => MODULE_ALIASES.has(p));
         if (nameParts.length > 1 && INSTANCE_METHODS.has(lastPart) && !baseIsModule) {
-          const objLatex = identToLatex(nameParts.slice(0, -1).join('.'));
+          const objLatex = dottedNameToLatex(nameParts.slice(0, -1));
           this.advance(); // LParen
           const args = this.parseArgList(TT.RParen);
           this.advance(); // RParen
           let result: string;
           if (lastPart === 'diff') {
             result = applyDiff(objLatex, args);
+          } else if (lastPart === 'integrate') {
+            // expr.integrate((x, a, b)) renders as a real integral, not a bare name
+            result = funcToLatex('integrate', [objLatex, ...args]);
           } else if (lastPart === 'conjugate' || lastPart === 'conj') {
             result = `\\overline{${objLatex}}`;
           } else {
@@ -814,12 +908,10 @@ class Parser {
       const dotted = DOTTED_CONSTANTS[fullName];
       if (dotted) return this.continuePostfix(dotted);
 
-      // Attribute .T (transpose) without call
-      const lastPart = nameParts[nameParts.length - 1];
-      if (nameParts.length > 1 && (lastPart === 'T' || lastPart === 'H')) {
-        const obj = identToLatex(nameParts.slice(0, -1).join('.'));
-        const sup = lastPart === 'T' ? '\\top' : '\\dagger';
-        return this.continuePostfix(`{${obj}}^{${sup}}`);
+      // Fix #17: generic attribute access on a variable — A.T / A.H stay special,
+      // anything else (A.shape, A.dtype) becomes a text subscript: A_{\text{shape}}
+      if (nameParts.length > 1 && !MODULE_ALIASES.has(nameParts[0])) {
+        return this.continuePostfix(dottedNameToLatex(nameParts));
       }
 
       return this.continuePostfix(identToLatex(fullName));
@@ -867,14 +959,11 @@ class Parser {
           continue;
         }
 
-        // Plain attribute (no call)
-        if (attr === 'T')    { base = `{${base}}^{\\top}`;    continue; }
-        if (attr === 'H')    { base = `{${base}}^{\\dagger}`; continue; }
-        if (attr === 'real') { base = `\\operatorname{Re}\\!\\left(${base}\\right)`; continue; }
-        if (attr === 'imag') { base = `\\operatorname{Im}\\!\\left(${base}\\right)`; continue; }
-
-        // Unknown attr — backtrack
-        this.pos = savedPos; break;
+        // Plain attribute (no call) — Fix #17: unknown attributes fall through to a
+        // text subscript (A.shape → A_{\text{shape}}) instead of backtracking, so
+        // chains like A.shape[0] keep parsing correctly
+        base = plainAttrToLatex(base, attr);
+        continue;
 
       } else break;
     }
@@ -932,12 +1021,23 @@ class Parser {
   private parseArgList(closing: TT): string[] {
     const args: string[] = [];
     while (this.peek().type !== closing && this.peek().type !== TT.EOF) {
-      // Skip keyword arguments (keyword=value) — parse the value
-      const saved = this.pos;
-      if (this.peek().type === TT.Identifier) {
+      // Fix #7: treat IDENT = value as a kwarg only inside call parens (never in
+      // subscripts), and only when the value parses cleanly up to ',' or the closing
+      // paren — otherwise backtrack and re-parse the whole thing as a positional arg.
+      if (closing === TT.RParen && this.peek().type === TT.Identifier) {
+        const saved = this.pos;
         this.advance();
-        if (this.peek().type === TT.Equals) { this.advance(); } // skip kwarg name=
-        else this.pos = saved;
+        if (this.peek().type === TT.Equals &&
+            this.tokens[this.pos + 1]?.type !== TT.Equals) {
+          this.advance(); // consume '='
+          const value = this.parseComparison();
+          if (this.peek().type === TT.Comma || this.peek().type === closing) {
+            args.push(value);
+            if (this.peek().type === TT.Comma) this.advance();
+            continue;
+          }
+        }
+        this.pos = saved; // not a clean kwarg — positional after all
       }
       args.push(this.parseComparison());
       if (this.peek().type === TT.Comma) this.advance(); else break;
@@ -967,13 +1067,66 @@ function splitAtDelim(s: string, delim: string): string[] {
   return parts;
 }
 
-// If s is a LaTeX tuple \left(a,\,b,\,c\right), return ['a','b','c'], else null
+// Fix #5: if s is wrapped in a single matching pair of \left(…\right) or plain (…),
+// return the inner content, verifying the outer parens actually match each other
+// (rejects things like "(a) + (b)"). Returns null otherwise.
+function stripOuterParens(s: string): string | null {
+  const t = s.trim();
+  let body: string | null = null;
+  if (t.startsWith('\\left(') && t.endsWith('\\right)')) body = t.slice(6, -7);
+  else if (t.startsWith('(') && t.endsWith(')')) body = t.slice(1, -1);
+  if (body === null) return null;
+  let depth = 0;
+  for (const ch of body) {
+    if ('({['.includes(ch)) depth++;
+    else if (')}]'.includes(ch)) { if (--depth < 0) return null; }
+  }
+  return depth === 0 ? body : null;
+}
+
+// Fix #5: robust tuple extraction — accepts \left(…\right) or plain (…), and both
+// the ',\,' and plain ',' separators, so integrate/Sum limits are never silently lost
 function extractTuple(s: string): string[] | null {
-  const P = '\\left(', S = '\\right)';
-  if (!s.startsWith(P) || !s.endsWith(S)) return null;
-  const inner = s.slice(P.length, s.length - S.length);
-  const parts = splitAtDelim(inner, ',\\,');
-  return parts.length >= 2 ? parts : null;
+  const inner = stripOuterParens(s);
+  if (inner === null) return null;
+  let parts = splitAtDelim(inner, ',\\,');
+  if (parts.length < 2) parts = splitAtDelim(inner, ',');
+  return parts.length >= 2 ? parts.map(p => p.trim()) : null;
+}
+
+// Fix #6: build an explicit r×c matrix filled with `fill` when the dims are small
+// positive integers; null lets the caller fall back to a symbolic form
+function buildConstMatrix(parts: string[], fill: string): string | null {
+  const dims = parts.map(p => Number(p));
+  if (dims.length === 0 || dims.length > 2 ||
+      !dims.every(d => Number.isInteger(d) && d > 0)) return null;
+  const [r, c] = dims.length === 2 ? [dims[0], dims[1]] : [1, dims[0]];
+  if (r > 8 || c > 8) return null;
+  const row = Array(c).fill(fill).join(' & ');
+  return `\\begin{bmatrix} ${Array(r).fill(row).join(' \\\\ ')} \\end{bmatrix}`;
+}
+
+// Fix #1: drop a \left(…\right) pair that wraps an entire already-grouped slot
+// (numerator, denominator, exponent) — but never unwrap tuples
+function unwrapGroup(s: string): string {
+  const body = stripOuterParens(s);
+  return body !== null && splitAtDelim(body, ',').length === 1 ? body : s;
+}
+
+// Fix #17: shared renderer for plain (non-call) attribute access
+function plainAttrToLatex(base: string, attr: string): string {
+  if (attr === 'T')    return `{${base}}^{\\top}`;
+  if (attr === 'H')    return `{${base}}^{\\dagger}`;
+  if (attr === 'real') return `\\operatorname{Re}\\!\\left(${base}\\right)`;
+  if (attr === 'imag') return `\\operatorname{Im}\\!\\left(${base}\\right)`;
+  return `{${base}}_{\\text{${attr}}}`;
+}
+
+// Fix #17: dotted variable names (a.b.c) fold into attribute subscripts
+function dottedNameToLatex(parts: string[]): string {
+  let base = identToLatex(parts[0]);
+  for (const attr of parts.slice(1)) base = plainAttrToLatex(base, attr);
+  return base;
 }
 
 // If s is \left[[r1],[r2],...\right], return rows as string[][]
@@ -1002,53 +1155,59 @@ function applyDiff(expr: string, args: string[]): string {
   return `\\frac{d^{${order}}}{d {${wrt}}^{${order}}} ${groupForPostfix(expr)}`;
 }
 
-// Wrap in \left(\right) only when the expression genuinely needs grouping
-// as a "postfix" operand (after \frac{d}{dx}, exponent base, etc.).
-// Rules: fractions need it; additive expressions need it; simple atoms don't.
-function needsParenAsBase(s: string): boolean {
-  if (s.startsWith('\\frac')) return true;
-  // top-level + or - (outside braces/parens)
+// Fix #1: detect a binary +/- at nesting depth 0 — now also counts [ ] so a minus
+// inside a list literal like \left[1,\,-2\right] no longer forces parentheses
+function hasTopLevelPlusMinus(s: string): boolean {
   let depth = 0;
   for (let i = 0; i < s.length; i++) {
     const ch = s[i];
-    if (ch === '{' || ch === '(') { depth++; continue; }
-    if (ch === '}' || ch === ')') { depth--; continue; }
+    if ('({['.includes(ch)) { depth++; continue; }
+    if (')}]'.includes(ch)) { depth--; continue; }
     if (depth === 0 && (ch === '+' || ch === '-') && i > 0) return true;
   }
   return false;
 }
 
-function groupForPostfix(s: string): string {
-  return needsParenAsBase(s) ? `\\left(${s}\\right)` : s;
+// Fix #1: only parenthesize when mathematically required — never re-wrap an
+// expression that is already a single \left(…\right) group
+function needsParenAsBase(s: string): boolean {
+  if (stripOuterParens(s) !== null) return false;
+  if (s.startsWith('\\frac')) return true; // (a/b)^n must stay unambiguous
+  return hasTopLevelPlusMinus(s);
 }
 
+function groupForPostfix(s: string): string {
+  // Fix #1: fractions are visually self-grouping after d/dx — only sums need parens
+  return stripOuterParens(s) === null && hasTopLevelPlusMinus(s)
+    ? `\\left(${s}\\right)` : s;
+}
+
+// Fix #15: consistent \cdot rules — juxtapose number·symbol and symbol·symbol
+// (including Greek commands and subscripted symbols, so 2*x*y → 2xy uniformly);
+// everything else keeps an explicit \cdot. Joined with a space so LaTeX commands
+// never merge with the following token.
 function joinFactors(factors: string[]): string {
   if (factors.length === 0) return '1';
   if (factors.length === 1) return factors[0];
+
+  // symbol, optionally subscripted and/or raised to a simple power: x, \alpha, x_{1}, {c}^{2}
+  const isSymbolAtom = (s: string) =>
+    /^(?:\{(?:\\[a-zA-Z]+|[a-zA-Z])(?:_\{[^{}]*\})?\}|\\[a-zA-Z]+|[a-zA-Z])(?:_\{[^{}]*\})?(?:\^\{[^{}]*\})?$/.test(s);
+  const isNumber     = (s: string) => /^-?\d+(?:\.\d+)?$/.test(s);
 
   const parts: string[] = [factors[0]];
   for (let k = 1; k < factors.length; k++) {
     const left  = factors[k - 1];
     const right = factors[k];
-    // Omit \cdot only when both sides are plain single letters or a digit followed
-    // by a single letter — never when either side is a LaTeX command (\...).
-    const leftIsSingle  = /^[a-zA-Z]$/.test(left);
-    const rightIsSingle = /^[a-zA-Z]$/.test(right);
-    const leftIsDigit   = /^[\d.]/.test(left);
-    const rightIsLatexCmd = right.startsWith('\\');
-
-    const omitCdot = !rightIsLatexCmd && (
-      (leftIsSingle && rightIsSingle) ||
-      (leftIsDigit  && rightIsSingle)
-    );
-
-    parts.push(omitCdot ? right : ` \\cdot ${right}`);
+    const omitCdot = isSymbolAtom(right) && (isSymbolAtom(left) || isNumber(left));
+    parts.push(omitCdot ? ` ${right}` : ` \\cdot ${right}`);
   }
   return parts.join('');
 }
 
 function needsParenInUnary(s: string): boolean {
-  return needsParenAsBase(s);
+  // Fix #1: -a/b is fine as -\frac{a}{b} — only additive operands need parens here
+  return stripOuterParens(s) === null && hasTopLevelPlusMinus(s);
 }
 
 function formatNumber(s: string): string {
@@ -1058,8 +1217,12 @@ function formatNumber(s: string): string {
   // Scientific notation: 1.5e-10 → 1.5 \times 10^{-10}
   const sci = s.match(/^([+-]?[\d.]+)[eE]([+-]?\d+)$/);
   if (sci) {
-    const [, m, exp] = sci;
-    return m === '1' ? `10^{${exp}}` : `${m} \\times 10^{${exp}}`;
+    const [, mRaw, exp] = sci;
+    const sign = mRaw.startsWith('-') ? '-' : '';
+    const m = mRaw.replace(/^[+-]/, '');
+    // Fix #14: compare the mantissa numerically so 1.0e5 renders 10^{5} like 1e5
+    if (parseFloat(m) === 1) return `${sign}10^{${exp}}`;
+    return `${sign}${m} \\times 10^{${exp}}`;
   }
   return s;
 }
@@ -1075,6 +1238,18 @@ export interface ConversionResult {
   error?: string;
 }
 
+// Convert a single logical line to structured { lhs, rhs }; falls back to escaped
+// text on parse failure. Used by the extension to render raw fallbacks for lines
+// SymPy could not evaluate in a multi-line "Evaluated" view.
+export function pythonLineToLatex(line: string): { lhs: string | null; rhs: string } {
+  try {
+    const parser = new Parser(tokenize(line));
+    return parser.parseStatement();
+  } catch {
+    return { lhs: null, rhs: `\\text{${escLatexText(line)}}` };
+  }
+}
+
 export function pythonToLatex(code: string): ConversionResult {
   try {
     const rawLines = code.split('\n');
@@ -1085,24 +1260,19 @@ export function pythonToLatex(code: string): ConversionResult {
     if (lines.length === 0) return { latex: '' };
 
     if (lines.length === 1) {
-      const tokens = tokenize(lines[0]);
-      const parser = new Parser(tokens);
-      return { latex: parser.parseStatement() };
+      const parser = new Parser(tokenize(lines[0]));
+      const { lhs, rhs } = parser.parseStatement();
+      return { latex: lhs !== null ? `${lhs} = ${rhs}` : rhs };
     }
 
     // Multi-line: emit an aligned block
-    const converted = lines.map(line => {
-      try {
-        const tokens = tokenize(line);
-        const parser = new Parser(tokens);
-        return parser.parseStatement();
-      } catch {
-        return `\\text{${escLatexText(line)}}`;
-      }
+    // Fix #2: alignment uses the parser's structured { lhs, rhs } so '&=' is inserted
+    // only at real assignments — never at rendered comparisons (==, !=) or any other
+    // '=' that happens to appear inside the LaTeX (the old string replace was naive)
+    const aligned = lines.map(line => {
+      const { lhs, rhs } = pythonLineToLatex(line);
+      return lhs !== null ? `${lhs} &= ${rhs}` : rhs;
     });
-
-    // Align on = signs
-    const aligned = converted.map(l => l.replace(' = ', ' &= '));
     return { latex: `\\begin{aligned}\n${aligned.join(' \\\\\n')}\n\\end{aligned}` };
 
   } catch (e: unknown) {

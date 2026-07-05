@@ -2,7 +2,7 @@
   "name": "python-expression-visualizer",
   "displayName": "Python Expression Visualizer",
   "description": "Instantly render Python math expressions — NumPy, SymPy, SciPy and more — as beautifully formatted LaTeX equations. Works in .py files and Jupyter notebooks.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "NickGholami",
   "icon": "images/icon.png",
   "license": "MIT",

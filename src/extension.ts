@@ -2,8 +2,9 @@ import * as vscode from 'vscode';
 import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
-import { spawnSync } from 'child_process';
-import { pythonToLatex, ConversionResult } from './pythonToLatex';
+// Fix #12: use async spawn instead of spawnSync so a slow SymPy never freezes the UI
+import { spawn } from 'child_process';
+import { pythonToLatex, pythonLineToLatex, ConversionResult } from './pythonToLatex';
 
 
 // ─── Python runner script (written to disk once per session) ─────────────────
@@ -64,51 +65,61 @@ for _line in preamble:
 _lines = [l.strip() for l in code.strip().split('\\n')
           if l.strip() and not l.strip().startswith('#')]
 
-_last_var = None
-_last_val = None
+# Evaluate EVERY line (not just the last) and emit one JSON entry per line:
+# [var_latex_or_null, expr_latex] when the line evaluated, null when it didn't.
+# Lines share the namespace so later lines can use earlier assignments.
+_results = []
 
 for _line in _lines:
+    _val = None
+    _var = None
     _m = re.match(r'^([A-Za-z_]\\w*)\\s*=(?![=+\\-*\\/&|^])\\s*(.+)$', _line)
     if _m:
         _varname, _rhs = _m.group(1), _m.group(2)
         try:
             exec(_line, _ns)
-            _last_var = _varname
-            _last_val = _ns.get(_varname)
+            _var = _varname
+            _val = _ns.get(_varname)
         except:
             try:
-                _last_val = eval(_rhs.strip(), _ns)
-                _last_var = _varname
+                _val = eval(_rhs.strip(), _ns)
+                _var = _varname
+                _ns[_varname] = _val
             except: pass
     else:
         try:
-            _last_val = eval(_line, _ns)
-            _last_var = None
+            _val = eval(_line, _ns)
         except:
             try: exec(_line, _ns)
             except: pass
 
-if _last_val is None:
+    if _val is None:
+        _results.append(None)
+        continue
+
+    # Force evaluation of unevaluated forms (Derivative, Integral, Sum, etc.)
+    try:
+        _evaled = _val.doit()
+        if _evaled != _val:
+            _val = _evaled
+    except: pass
+
+    try:
+        from sympy import latex, Symbol
+        _expr_latex = latex(_val)
+        if _var:
+            try:    _var_latex = latex(Symbol(_var))
+            except: _var_latex = _var
+            _results.append([_var_latex, _expr_latex])
+        else:
+            _results.append([None, _expr_latex])
+    except:
+        _results.append(None)
+
+if all(r is None for r in _results):
     sys.stderr.write('no-result'); sys.exit(1)
 
-# Force evaluation of unevaluated forms (Derivative, Integral, Sum, etc.)
-try:
-    _evaled = _last_val.doit()
-    if _evaled != _last_val:
-        _last_val = _evaled
-except: pass
-
-try:
-    from sympy import latex, Symbol
-    _expr_latex = latex(_last_val)
-    if _last_var:
-        try:    _var_latex = latex(Symbol(_last_var))
-        except: _var_latex = _last_var
-        print(_var_latex + ' = ' + _expr_latex)
-    else:
-        print(_expr_latex)
-except Exception as e:
-    sys.stderr.write(str(e)); sys.exit(1)
+print(json.dumps(_results))
 `.trim();
 
 const SCRIPT_PATH = path.join(os.tmpdir(), 'pev_runner.py');
@@ -119,29 +130,40 @@ let   scriptWritten = false;  // reset to false to force rewrite on next run
 
 export function activate(context: vscode.ExtensionContext) {
 
-  const cmd = vscode.commands.registerCommand('pythonVisualizer.visualize', () => {
+  // Fix #12: command handlers are async — the SymPy subprocess runs off the UI thread
+  const cmd = vscode.commands.registerCommand('pythonVisualizer.visualize', async () => {
     const editor = vscode.window.activeTextEditor;
     if (!editor) { vscode.window.showErrorMessage('No active editor found.'); return; }
     const sel  = editor.selection;
     const code = editor.document.getText(sel.isEmpty ? undefined : sel).trim();
     if (!code) { vscode.window.showWarningMessage('Select a Python expression first.'); return; }
-    const result = resolveLatex(code, editor.document, sel.start);
+    const result = await resolveLatex(code, editor.document, sel.start);
     showExtendedPanel(context, code, result);
   });
 
-  const quickCmd = vscode.commands.registerCommand('pythonVisualizer.quickPreview', () => {
+  const quickCmd = vscode.commands.registerCommand('pythonVisualizer.quickPreview', async () => {
     const editor = vscode.window.activeTextEditor;
     if (!editor) { vscode.window.showErrorMessage('No active editor found.'); return; }
     const sel = editor.selection;
     if (sel.isEmpty) { vscode.window.showWarningMessage('Select a Python expression first.'); return; }
     const code = editor.document.getText(sel).trim();
     if (!code) { return; }
-    const result = resolveLatex(code, editor.document, sel.start);
+    const result = await resolveLatex(code, editor.document, sel.start);
     showQuickPanel(context, code, result);
   });
 
+  // Fix #11: only close the quick panel when the user deliberately empties the
+  // selection (mouse/keyboard) in a Python editor — programmatic or focus-driven
+  // selection events (e.g. clicking the panel itself) no longer close it
   const selectionWatcher = vscode.window.onDidChangeTextEditorSelection(event => {
-    if (event.selections[0].isEmpty) { closeQuickPanel(); }
+    const deliberate =
+      event.kind === vscode.TextEditorSelectionChangeKind.Mouse ||
+      event.kind === vscode.TextEditorSelectionChangeKind.Keyboard;
+    if (deliberate &&
+        event.textEditor.document.languageId === 'python' &&
+        event.selections[0].isEmpty) {
+      closeQuickPanel();
+    }
   });
 
   context.subscriptions.push(cmd, quickCmd, selectionWatcher);
@@ -157,17 +179,22 @@ interface ResolvedLatex {
   parserError?: string;
 }
 
-function resolveLatex(
+// Fix #12: async — awaits the subprocess instead of blocking the extension host
+async function resolveLatex(
   code: string,
   document: vscode.TextDocument,
   selectionStart: vscode.Position,
-): ResolvedLatex {
+): Promise<ResolvedLatex> {
   const { latex: parserLatex, error: parserError } = pythonToLatex(code);
   const result: ResolvedLatex = { parserLatex, parserError };
 
   if (hasSymPyImport(document)) {
     const preamble = extractPreamble(document, selectionStart);
-    const sympy = trySymPyLatex(code, preamble);
+    const sympyLines = await trySymPyLatex(code, preamble);
+    // The runner returns one result per line; merge evaluated lines with raw
+    // parser fallbacks so multi-line selections keep every line in the
+    // "Evaluated" view, not just the last one.
+    const sympy = buildSympyLatex(code, sympyLines);
     // Only expose the SymPy version if it's meaningfully different from the
     // parser version — not just a reordering of the same terms.
     if (sympy !== null && isMeaningfullyDifferent(parserLatex, sympy)) {
@@ -178,23 +205,66 @@ function resolveLatex(
   return result;
 }
 
+// One entry per selected line: [var_latex | null, expr_latex] when SymPy evaluated
+// the line, or null when it could not.
+type SymPyLine = [string | null, string] | null;
+
+// Merge per-line SymPy results into a single LaTeX block. Lines SymPy could not
+// evaluate keep their structural-parser rendering, so all selected lines stay
+// visible in the "Evaluated" view.
+function buildSympyLatex(code: string, sympyLines: SymPyLine[] | null): string | null {
+  if (!sympyLines || !sympyLines.some(l => l !== null)) { return null; }
+
+  // Same line filtering as the parser and the Python runner use
+  const lines = code.split('\n')
+    .map(l => l.trim())
+    .filter(l => l.length > 0 && !l.startsWith('#'));
+  if (lines.length !== sympyLines.length) { return null; } // line accounting mismatch
+
+  // The LHS variable name always keeps the parser's rendering (expr55 stays expr55) —
+  // SymPy's latex(Symbol(...)) would restyle it (expr_{55}); only the RHS is evaluated.
+  if (lines.length === 1) {
+    const s = sympyLines[0];
+    if (!s) { return null; }
+    const lhs = pythonLineToLatex(lines[0]).lhs ?? s[0];
+    return lhs !== null ? `${lhs} = ${s[1]}` : s[1];
+  }
+
+  const rows = lines.map((line, i) => {
+    const s = sympyLines[i];
+    const p = pythonLineToLatex(line);
+    if (s) {
+      const lhs = p.lhs ?? s[0];
+      return lhs !== null ? `${lhs} &= ${s[1]}` : s[1];
+    }
+    // raw fallback for non-evaluable lines
+    return p.lhs !== null ? `${p.lhs} &= ${p.rhs}` : p.rhs;
+  });
+  return `\\begin{aligned}\n${rows.join(' \\\\\n')}\n\\end{aligned}`;
+}
+
 // Returns true when two LaTeX strings differ beyond mere term reordering.
 // Strategy: strip all LaTeX markup, keep only alphanumeric chars and basic
 // operators, sort what remains, and compare.  If the sorted content is the
 // same the expressions are considered equivalent (just reordered).
+// Fix #3: hardened normalization — handles \\ row breaks (incl. \\[4pt]), array
+// column specs, and ALL escaped symbols (\{, \|, \%, …), so matrices from SymPy
+// vs. the structural parser no longer produce false "meaningfully different" calls
 function isMeaningfullyDifferent(a: string, b: string): boolean {
   const normalize = (s: string) =>
     s
+      // \begin{array}{ccc} carries a column spec that must go too
+      .replace(/\\begin\{array\}\{[^}]*\}/g, ' ')
       // Remove \begin{env} and \end{env} entirely (matrix, aligned, cases, etc.)
-      .replace(/\\(?:begin|end)\{[^}]*\}/g, '')
-      // Replace LaTeX line-breaks \\ with a space BEFORE command stripping,
+      .replace(/\\(?:begin|end)\{[^}]*\}/g, ' ')
+      // LaTeX row breaks \\ and \\[6pt] become spaces BEFORE command stripping,
       // otherwise the second \ merges with the next letter (e.g. \\c → \c removed)
-      .replace(/\\\\/g, ' ')
-      // Drop all LaTeX commands: \sin, \frac, \operatorname, and single-char
-      // spacing/punctuation commands like \!, \,, \;, \:
-      .replace(/\\(?:[a-zA-Z]+|[!,;: ])/g, '')
-      // Collapse subscript/superscript grouping so expr50 == expr_{50}
-      .replace(/[_{}^]/g, '')
+      .replace(/\\\\(?:\[[^\]]*\])?/g, ' ')
+      // Drop ALL LaTeX commands (\sin, \operatorname*) and escaped single chars
+      // (\!, \,, \{, \}, \|, \%, …) — the old class missed the escaped symbols
+      .replace(/\\(?:[a-zA-Z]+\*?|[^a-zA-Z])/g, ' ')
+      // Collapse grouping and alignment chars so expr50 == expr_{50}
+      .replace(/[_{}^&]/g, '')
       // Keep only alphanumeric and meaningful math operators
       .replace(/[^a-zA-Z0-9+\-*/=<>]/g, '')
       .split('').sort().join('');
@@ -228,22 +298,57 @@ function extractPreamble(document: vscode.TextDocument, before: vscode.Position)
   return lines;
 }
 
-// Spawn Python, run the SymPy runner, return LaTeX string or null on failure
-function trySymPyLatex(code: string, preamble: string[]): string | null {
+interface PyRunResult {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  spawnFailed: boolean;
+}
+
+// Fix #12: async spawn wrapper with a kill timer — never blocks the UI thread
+function runPython(py: string, args: string[], timeoutMs: number): Promise<PyRunResult> {
+  return new Promise(resolve => {
+    let stdout = '', stderr = '', timedOut = false;
+    const child = spawn(py, args);
+    const timer = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
+    child.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
+    child.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+    child.on('error', () => {
+      clearTimeout(timer);
+      resolve({ status: null, stdout, stderr, timedOut, spawnFailed: true });
+    });
+    child.on('close', status => {
+      clearTimeout(timer);
+      resolve({ status, stdout, stderr, timedOut, spawnFailed: false });
+    });
+  });
+}
+
+// Spawn Python, run the SymPy runner, return per-line results or null on failure
+async function trySymPyLatex(code: string, preamble: string[]): Promise<SymPyLine[] | null> {
   try {
     fs.writeFileSync(SCRIPT_PATH, PYTHON_SCRIPT, 'utf8');
     fs.writeFileSync(DATA_PATH, JSON.stringify({ code, preamble }), 'utf8');
 
     for (const py of ['python3', 'python']) {
-      const r = spawnSync(py, [SCRIPT_PATH, DATA_PATH], {
-        encoding: 'utf8',
-        timeout: 10000,
-      });
-      if (r.status === 0 && r.stdout.trim()) { return r.stdout.trim(); }
-      // "no-sympy" stderr means SymPy isn't installed — don't try python fallback
-      if (r.stderr?.includes('no-sympy')) { return null; }
+      // Fix #12: timeout reduced from 10s to 5s
+      const r = await runPython(py, [SCRIPT_PATH, DATA_PATH], 5000);
+      if (r.spawnFailed) { continue; }     // interpreter not found — try the next one
+      // Fix #13: a timeout, a no-sympy signal, or any completed-but-failed run stops
+      // here — retrying the other interpreter would only double the wait for the
+      // same outcome
+      if (r.timedOut) { return null; }
+      if (r.status === 0 && r.stdout.trim()) {
+        // The runner prints a JSON array with one entry per line
+        try {
+          const parsed: unknown = JSON.parse(r.stdout.trim());
+          if (Array.isArray(parsed)) { return parsed as SymPyLine[]; }
+        } catch { /* malformed output */ }
+      }
+      return null;
     }
-  } catch { /* file system or spawn error */ }
+  } catch { /* file system error */ }
   return null;
 }
 
@@ -384,8 +489,8 @@ function buildQuickHtml(
   </div>
   <script nonce="${nonce}" src="${katexJs}"></script>
   <script nonce="${nonce}">
-    const rawLatex   = ${JSON.stringify(result.parserLatex)};
-    const evalLatex  = ${JSON.stringify(result.sympyLatex ?? null)};
+    const rawLatex   = ${jsonForScript(result.parserLatex)};
+    const evalLatex  = ${jsonForScript(result.sympyLatex ?? null)};
     const vscode     = acquireVsCodeApi();
     const box        = document.getElementById('render-box');
     let   current    = rawLatex;
@@ -520,9 +625,9 @@ function buildExtendedHtml(
 
   <script nonce="${nonce}" src="${katexJs}"></script>
   <script nonce="${nonce}">
-    const rawLatex  = ${JSON.stringify(result.parserLatex)};
-    const evalLatex = ${JSON.stringify(result.sympyLatex ?? null)};
-    const code      = ${JSON.stringify(code)};
+    const rawLatex  = ${jsonForScript(result.parserLatex)};
+    const evalLatex = ${jsonForScript(result.sympyLatex ?? null)};
+    const code      = ${jsonForScript(code)};
     const renderBox = document.getElementById('render-box');
     const latexSrc  = document.getElementById('latex-src');
     const vscode    = acquireVsCodeApi();
@@ -584,6 +689,15 @@ function buildExtendedHtml(
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+// Fix #18: JSON.stringify alone is NOT safe inside a <script> block — a selection
+// containing "</script>" would terminate the script tag and inject raw HTML.
+// Escaping '<' as the JS escape sequence \\u003c keeps the string identical in JS
+// while making HTML breakout impossible. (KaTeX itself escapes its rendered
+// output, and code shown in the page body goes through escHtml.)
+function jsonForScript(v: unknown): string {
+  return JSON.stringify(v).replace(/</g, '\\u003c');
+}
 
 function escHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
